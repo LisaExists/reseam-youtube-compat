@@ -1,0 +1,8 @@
+.gradle/
+build/
+*.reseam
+*.key
+*.pem
+*.pk8
+*.der
+.env
