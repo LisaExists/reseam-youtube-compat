@@ -165,7 +165,9 @@ jobs:
       - name: Build the signed bundle
         if: steps.upstream.outputs.should_release == 'true'
         working-directory: ${{ runner.temp }}/reseam-upstream
-        run: ./gradlew --no-daemon --max-workers=2 -Dorg.gradle.jvmargs=-Xmx1536m bundle
+        env:
+          BUNDLE_VERSION: ${{ steps.upstream.outputs.version }}
+        run: ./gradlew --no-daemon --max-workers=2 -Dorg.gradle.jvmargs=-Xmx1536m bundle "-PreleaseTag=${BUNDLE_VERSION}"
 
       - name: Verify the signed bundle and publish it
         if: steps.upstream.outputs.should_release == 'true'
