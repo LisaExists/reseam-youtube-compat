@@ -25,6 +25,7 @@ jobs:
       GH_TOKEN: ${{ github.token }}
       UPSTREAM_REPOSITORY: https://git.reseam.app/reseam/patches.git
       UPSTREAM_RELEASES_API: https://git.reseam.app/api/v1/repos/reseam/patches/releases?limit=100&page=1
+      HAS_SIGNING_KEY: ${{ secrets.BUNDLE_SIGNING_KEY_B64 != '' }}
 
     steps:
       - name: Check out this repository
@@ -57,6 +58,16 @@ jobs:
 
           if gh release view "$bundle_version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Already published upstream release $upstream_tag as $bundle_version."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # After an unsigned verification build, avoid rebuilding the same upstream
+          # release on every poll. A configured permanent key bypasses this marker.
+          if [[ "$HAS_SIGNING_KEY" != "true" && -f state/last-verified-upstream.txt ]] \
+            && grep -Fxq "$upstream_tag" state/last-verified-upstream.txt \
+            && grep -Fxq "$upstream_commit" state/last-verified-upstream.txt; then
+            echo "Upstream $upstream_tag was already verified; waiting for the permanent signing key."
             echo "should_release=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -186,6 +197,15 @@ jobs:
           grep -Fq "21.23.492" dist/BUNDLE_CONTENTS.txt
 
           if [[ "$PUBLISH_ENABLED" != "true" ]]; then
+            mkdir -p state
+            printf '%s\\n%s\\n' "$UPSTREAM_TAG" "$UPSTREAM_COMMIT" > state/last-verified-upstream.txt
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add state/last-verified-upstream.txt
+            if ! git diff --cached --quiet; then
+              git commit -m "ci: record verified upstream release $UPSTREAM_TAG"
+              git push origin HEAD:main
+            fi
             echo "Build and bundle verification succeeded. No release was published because BUNDLE_SIGNING_KEY_B64 is not configured."
             exit 0
           fi
