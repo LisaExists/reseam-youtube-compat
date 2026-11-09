@@ -1,8 +1,13 @@
 name: Poll upstream and publish
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/poll-upstream.yml"
+      - "overlay/**"
   schedule:
-    - cron: "23 */4 * * *"
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 permissions:
@@ -19,22 +24,59 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       UPSTREAM_REPOSITORY: https://git.reseam.app/reseam/patches.git
-      UPSTREAM_RELEASE_API: https://git.reseam.app/api/v1/repos/reseam/patches/releases/latest
+      UPSTREAM_RELEASES_API: https://git.reseam.app/api/v1/repos/reseam/patches/releases?limit=100&page=1
 
     steps:
       - name: Check out this repository
         uses: actions/checkout@v7
 
+      - name: Find the newest stable upstream release
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          releases_json="$RUNNER_TEMP/upstream-releases.json"
+          release_json="$RUNNER_TEMP/upstream-release.json"
+          curl -fsSL --retry 4 --retry-delay 3 "$UPSTREAM_RELEASES_API" -o "$releases_json"
+
+          # Forgejo returns releases newest-first. Ignore drafts and prereleases.
+          jq -e '[.[] | select((.draft // false) == false and (.prerelease // false) == false)] | .[0]' \
+            "$releases_json" > "$release_json"
+
+          upstream_tag="$(jq -er '.tag_name | select(type == "string" and length > 0)' "$release_json")"
+          upstream_commit="$(jq -er '.target_commitish | select(type == "string" and test("^[0-9a-fA-F]{40}$"))' "$release_json")"
+          [[ "$upstream_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo "Unexpected upstream release tag: $upstream_tag" >&2
+            exit 1
+          }
+
+          bundle_version="${upstream_tag}-lisa.1"
+          echo "tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$upstream_commit" >> "$GITHUB_OUTPUT"
+          echo "version=$bundle_version" >> "$GITHUB_OUTPUT"
+
+          if gh release view "$bundle_version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Already published upstream release $upstream_tag as $bundle_version."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "New upstream stable release: $upstream_tag ($upstream_commit)"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
       - name: Set up JDK 17
+        if: steps.upstream.outputs.should_release == 'true'
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Set up Android SDK
+        if: steps.upstream.outputs.should_release == 'true'
         uses: android-actions/setup-android@v4
 
       - name: Install the newest stable Android platform
+        if: steps.upstream.outputs.should_release == 'true'
         shell: bash
         run: |
           set -euo pipefail
@@ -44,39 +86,6 @@ jobs:
             exit 1
           }
           sdkmanager --install "$platform"
-
-      - name: Check the latest upstream release
-        id: upstream
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_json="$RUNNER_TEMP/upstream-release.json"
-          curl -fsSL --retry 4 --retry-delay 3 "$UPSTREAM_RELEASE_API" -o "$release_json"
-
-          upstream_tag="$(jq -er '.tag_name | select(type == "string" and length > 0)' "$release_json")"
-          upstream_commit="$(jq -er '.target_commitish | select(type == "string" and test("^[0-9a-fA-F]{40}$"))' "$release_json")"
-          prerelease="$(jq -r '.prerelease // false' "$release_json")"
-          test "$(jq -r '.draft // false' "$release_json")" = "false"
-
-          bundle_version="${upstream_tag}-lisa.1"
-          echo "tag=$upstream_tag" >> "$GITHUB_OUTPUT"
-          echo "commit=$upstream_commit" >> "$GITHUB_OUTPUT"
-          echo "version=$bundle_version" >> "$GITHUB_OUTPUT"
-
-          if [[ "$prerelease" == "true" ]]; then
-            echo "Upstream latest release $upstream_tag is a prerelease; waiting for a stable release."
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if gh release view "$bundle_version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Already published upstream release $upstream_tag as $bundle_version."
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          echo "New upstream release: $upstream_tag ($upstream_commit)"
-          echo "should_release=true" >> "$GITHUB_OUTPUT"
 
       - name: Clone the exact upstream release
         if: steps.upstream.outputs.should_release == 'true'
@@ -101,8 +110,9 @@ jobs:
           UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
         run: python3 overlay/apply_fixes.py "$RUNNER_TEMP/reseam-upstream" "$UPSTREAM_COMMIT"
 
-      - name: Install the matching Reseam CLI and stable signing key
+      - name: Install matching Reseam CLI and signing key
         if: steps.upstream.outputs.should_release == 'true'
+        id: signing
         shell: bash
         env:
           BUNDLE_SIGNING_KEY_B64: ${{ secrets.BUNDLE_SIGNING_KEY_B64 }}
@@ -115,19 +125,22 @@ jobs:
             exit 1
           }
 
-          if [[ -z "$BUNDLE_SIGNING_KEY_B64" ]]; then
-            echo "Missing repository Actions secret: BUNDLE_SIGNING_KEY_B64." >&2
-            echo "Generate one key with 'reseam bundle keygen' and add its base64 value in Settings > Secrets and variables > Actions." >&2
-            exit 1
-          fi
-
           cli="$RUNNER_TEMP/reseam"
           curl -fsSL --retry 4 --retry-delay 3 \
             "https://cdn.reseam.app/engine/v${cli_version}/reseam-linux-x64" -o "$cli"
           chmod +x "$cli"
 
           key="$RUNNER_TEMP/bundle-signing.key"
-          printf '%s' "$BUNDLE_SIGNING_KEY_B64" | base64 --decode > "$key"
+          if [[ -n "$BUNDLE_SIGNING_KEY_B64" ]]; then
+            printf '%s' "$BUNDLE_SIGNING_KEY_B64" | base64 --decode > "$key"
+            echo "publish_enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "BUNDLE_SIGNING_KEY_B64 is not configured; making a disposable verification key."
+            echo "This run will build and verify the bundle, but will not publish a release."
+            "$cli" bundle keygen --out "$key" > "$RUNNER_TEMP/temporary-keygen-output.txt"
+            echo "publish_enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
           chmod 600 "$key"
           test "$(wc -c < "$key" | tr -d ' ')" = "32" || {
             echo "The signing seed must decode to exactly 32 bytes." >&2
@@ -143,13 +156,14 @@ jobs:
         working-directory: ${{ runner.temp }}/reseam-upstream
         run: ./gradlew --no-daemon --max-workers=2 -Dorg.gradle.jvmargs=-Xmx1536m bundle
 
-      - name: Verify, create the update index, and publish
+      - name: Verify the signed bundle and publish it
         if: steps.upstream.outputs.should_release == 'true'
         shell: bash
         env:
           UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
           UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
           BUNDLE_VERSION: ${{ steps.upstream.outputs.version }}
+          PUBLISH_ENABLED: ${{ steps.signing.outputs.publish_enabled }}
         run: |
           set -euo pipefail
           source="$RUNNER_TEMP/reseam-upstream"
@@ -170,6 +184,11 @@ jobs:
           grep -Fq "Theme" dist/BUNDLE_CONTENTS.txt
           grep -Fq "Restore classic miniplayer" dist/BUNDLE_CONTENTS.txt
           grep -Fq "21.23.492" dist/BUNDLE_CONTENTS.txt
+
+          if [[ "$PUBLISH_ENABLED" != "true" ]]; then
+            echo "Build and bundle verification succeeded. No release was published because BUNDLE_SIGNING_KEY_B64 is not configured."
+            exit 0
+          fi
 
           previous="$RUNNER_TEMP/previous-release"
           mkdir -p "$previous"
