@@ -39,11 +39,13 @@ The private signing key must remain stable between releases. Generate it once, b
 
 `BUNDLE_SIGNING_KEY_B64`
 
-You need the Reseam CLI installed locally. Generate the key:
+You need the Reseam CLI installed locally. The current upstream release uses CLI 0.39.1; download that matching binary and generate the key:
 
 ```sh
-mkdir -p ~/.reseam
-reseam bundle keygen --out ~/.reseam/bundle-signing.key
+mkdir -p ~/.local/bin ~/.reseam
+curl -fsSL https://cdn.reseam.app/engine/v0.39.1/reseam-linux-x64 -o ~/.local/bin/reseam
+chmod +x ~/.local/bin/reseam
+~/.local/bin/reseam bundle keygen --out ~/.reseam/bundle-signing.key
 ```
 
 On Linux, copy its single-line base64 representation:
