@@ -68,7 +68,7 @@ Without the secret, the workflow can still compile and verify the current bundle
 
 - Upstream source: [Reseam/patches](https://git.reseam.app/reseam/patches)
 - Upstream release API: `https://git.reseam.app/api/v1/repos/reseam/patches/releases/latest`
-- Upstream code is licensed under AGPL-3.0-or-later with additional terms and notices; see [upstream LICENSE](https://git.reseam.app/reseam/patches/src/branch/main/LICENSE) and [NOTICE](https://git.reseam.app/reseam/patches/src/branch/main/NOTICE).
+- Upstream code is licensed under AGPL-3.0-or-later with additional terms. Copies of the upstream [LICENSE](LICENSE) and [NOTICE](NOTICE) are preserved here and attached to each release.
 - Our overlay is provided under AGPL-3.0-or-later.
 
 The overlay is intentionally strict. If upstream renames a resource, changes a Kotlin implementation, removes a feature hook, or introduces a conflicting patch, automation will fail rather than guessing at a replacement. Update `overlay/apply_fixes.py` and test the new source before restoring automatic publishing.
