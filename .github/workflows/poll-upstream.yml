@@ -1,0 +1,242 @@
+name: Poll upstream and publish
+
+on:
+  schedule:
+    - cron: "23 */4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reseam-youtube-compat-release
+  cancel-in-progress: false
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ github.token }}
+      UPSTREAM_REPOSITORY: https://git.reseam.app/reseam/patches.git
+      UPSTREAM_RELEASE_API: https://git.reseam.app/api/v1/repos/reseam/patches/releases/latest
+
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v7
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+
+      - name: Install the newest stable Android platform
+        shell: bash
+        run: |
+          set -euo pipefail
+          platform="$(sdkmanager --list | sed -nE 's/^[[:space:]]*(platforms;android-[0-9]+)[[:space:]]*\|.*/\1/p' | sort -Vu | tail -n1)"
+          test -n "$platform" || {
+            echo "Android SDK did not report an installable platform." >&2
+            exit 1
+          }
+          sdkmanager --install "$platform"
+
+      - name: Check the latest upstream release
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/upstream-release.json"
+          curl -fsSL --retry 4 --retry-delay 3 "$UPSTREAM_RELEASE_API" -o "$release_json"
+
+          upstream_tag="$(jq -er '.tag_name | select(type == "string" and length > 0)' "$release_json")"
+          upstream_commit="$(jq -er '.target_commitish | select(type == "string" and test("^[0-9a-fA-F]{40}$"))' "$release_json")"
+          prerelease="$(jq -r '.prerelease // false' "$release_json")"
+          test "$(jq -r '.draft // false' "$release_json")" = "false"
+
+          bundle_version="${upstream_tag}-lisa.1"
+          echo "tag=$upstream_tag" >> "$GITHUB_OUTPUT"
+          echo "commit=$upstream_commit" >> "$GITHUB_OUTPUT"
+          echo "version=$bundle_version" >> "$GITHUB_OUTPUT"
+
+          if [[ "$prerelease" == "true" ]]; then
+            echo "Upstream latest release $upstream_tag is a prerelease; waiting for a stable release."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if gh release view "$bundle_version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Already published upstream release $upstream_tag as $bundle_version."
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "New upstream release: $upstream_tag ($upstream_commit)"
+          echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Clone the exact upstream release
+        if: steps.upstream.outputs.should_release == 'true'
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: |
+          set -euo pipefail
+          upstream="$RUNNER_TEMP/reseam-upstream"
+          git clone --depth 1 --branch "$UPSTREAM_TAG" "$UPSTREAM_REPOSITORY" "$upstream"
+          actual="$(git -C "$upstream" rev-parse HEAD)"
+          test "$actual" = "$UPSTREAM_COMMIT" || {
+            echo "The release tag resolved to $actual, but the release API reported $UPSTREAM_COMMIT." >&2
+            exit 1
+          }
+          echo "UPSTREAM_DIR=$upstream" >> "$GITHUB_ENV"
+
+      - name: Apply the compatibility overlay
+        if: steps.upstream.outputs.should_release == 'true'
+        env:
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+        run: python3 overlay/apply_fixes.py "$RUNNER_TEMP/reseam-upstream" "$UPSTREAM_COMMIT"
+
+      - name: Install the matching Reseam CLI and stable signing key
+        if: steps.upstream.outputs.should_release == 'true'
+        shell: bash
+        env:
+          BUNDLE_SIGNING_KEY_B64: ${{ secrets.BUNDLE_SIGNING_KEY_B64 }}
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/reseam-upstream"
+          cli_version="$(sed -nE 's/.*id\("app\.reseam\.workspace"\) version "([^"]+)".*/\1/p' "$source/settings.gradle.kts")"
+          test -n "$cli_version" || {
+            echo "Could not determine the Reseam CLI version from settings.gradle.kts." >&2
+            exit 1
+          }
+
+          if [[ -z "$BUNDLE_SIGNING_KEY_B64" ]]; then
+            echo "Missing repository Actions secret: BUNDLE_SIGNING_KEY_B64." >&2
+            echo "Generate one key with 'reseam bundle keygen' and add its base64 value in Settings > Secrets and variables > Actions." >&2
+            exit 1
+          fi
+
+          cli="$RUNNER_TEMP/reseam"
+          curl -fsSL --retry 4 --retry-delay 3 \
+            "https://cdn.reseam.app/engine/v${cli_version}/reseam-linux-x64" -o "$cli"
+          chmod +x "$cli"
+
+          key="$RUNNER_TEMP/bundle-signing.key"
+          printf '%s' "$BUNDLE_SIGNING_KEY_B64" | base64 --decode > "$key"
+          chmod 600 "$key"
+          test "$(wc -c < "$key" | tr -d ' ')" = "32" || {
+            echo "The signing seed must decode to exactly 32 bytes." >&2
+            exit 1
+          }
+
+          echo "RESEAM_BIN=$cli" >> "$GITHUB_ENV"
+          echo "RESEAM_BUNDLE_KEY=$key" >> "$GITHUB_ENV"
+          echo "RESEAM_CLI_VERSION=$cli_version" >> "$GITHUB_ENV"
+
+      - name: Build the signed bundle
+        if: steps.upstream.outputs.should_release == 'true'
+        working-directory: ${{ runner.temp }}/reseam-upstream
+        run: ./gradlew --no-daemon --max-workers=2 -Dorg.gradle.jvmargs=-Xmx1536m bundle
+
+      - name: Verify, create the update index, and publish
+        if: steps.upstream.outputs.should_release == 'true'
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+          UPSTREAM_COMMIT: ${{ steps.upstream.outputs.commit }}
+          BUNDLE_VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/reseam-upstream"
+          bundle="$source/build/reseam/reseam-patches.reseam"
+          test -s "$bundle"
+
+          public_key="$(unzip -p "$bundle" manifest.pubkey | od -An -v -tx1 | tr -d ' \n')"
+          test "${#public_key}" -eq 64 || {
+            echo "Could not extract a 32-byte Ed25519 public key from the bundle." >&2
+            exit 1
+          }
+
+          mkdir -p dist
+          cp "$bundle" dist/reseam-youtube-compat.reseam
+          printf '%s\n' "$public_key" > dist/BUNDLE_PUBLIC_KEY.txt
+
+          "$RESEAM_BIN" bundle list dist/reseam-youtube-compat.reseam --trust "$public_key" | tee dist/BUNDLE_CONTENTS.txt
+          grep -Fq "Theme" dist/BUNDLE_CONTENTS.txt
+          grep -Fq "Restore classic miniplayer" dist/BUNDLE_CONTENTS.txt
+          grep -Fq "21.23.492" dist/BUNDLE_CONTENTS.txt
+
+          previous="$RUNNER_TEMP/previous-release"
+          mkdir -p "$previous"
+          index="$RUNNER_TEMP/patches.json"
+          if gh release view --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release download --repo "$GITHUB_REPOSITORY" --pattern patches.json --dir "$previous"
+            test -s "$previous/patches.json" || {
+              echo "The previous release exists but did not contain patches.json; refusing to reset history." >&2
+              exit 1
+            }
+            cp "$previous/patches.json" "$index"
+          fi
+
+          download_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$BUNDLE_VERSION/reseam-youtube-compat.reseam"
+          release_notes="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "Community compatibility bundle based on upstream Reseam patches $UPSTREAM_TAG."
+            echo
+            echo "Upstream commit: $UPSTREAM_COMMIT"
+            echo
+            echo "This is not an official Reseam release."
+            echo
+            echo "## Upstream release notes"
+            jq -r '.body // "No upstream release notes supplied."' "$RUNNER_TEMP/upstream-release.json"
+            echo
+            echo "## Overlay"
+            echo "- YouTube AMOLED/dark and light surface resource compatibility."
+            echo "- Legacy theme color lookup compatibility."
+            echo "- Classic horizontal miniplayer patch (flags 45630429 and 45622882)."
+            echo "- Portrait-player status-bar inset compatibility."
+          } > "$release_notes"
+
+          "$RESEAM_BIN" publish patches dist/reseam-youtube-compat.reseam \
+            --version "$BUNDLE_VERSION" \
+            --url "$download_url" \
+            --out "$index" \
+            --description-file "$release_notes" \
+            --homepage "https://github.com/$GITHUB_REPOSITORY"
+
+          jq -e --arg version "$BUNDLE_VERSION" \
+            '.releases[] | select(.version == $version)' "$index" >/dev/null
+          indexed_key="$(jq -r '.bundle.public_key' "$index")"
+          test "$indexed_key" = "$public_key" || {
+            echo "The update index does not contain the signing key embedded in this bundle." >&2
+            exit 1
+          }
+          cp "$index" dist/patches.json
+          cp "$release_notes" dist/RELEASE_NOTES.md
+          printf 'Upstream: %s\nCommit: %s\n' "$UPSTREAM_TAG" "$UPSTREAM_COMMIT" > dist/UPSTREAM.txt
+
+          (
+            cd dist
+            sha256sum reseam-youtube-compat.reseam patches.json BUNDLE_PUBLIC_KEY.txt BUNDLE_CONTENTS.txt UPSTREAM.txt > SHA256SUMS.txt
+          )
+
+          gh release create "$BUNDLE_VERSION" \
+            dist/reseam-youtube-compat.reseam \
+            dist/patches.json \
+            dist/BUNDLE_PUBLIC_KEY.txt \
+            dist/BUNDLE_CONTENTS.txt \
+            dist/UPSTREAM.txt \
+            dist/RELEASE_NOTES.md \
+            dist/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "YouTube compatibility bundle $BUNDLE_VERSION" \
+            --notes-file "$release_notes"
+
+          echo "Published $BUNDLE_VERSION"
+          echo "Manager feed: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/patches.json"
