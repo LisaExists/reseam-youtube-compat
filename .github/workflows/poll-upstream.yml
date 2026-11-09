@@ -258,10 +258,11 @@ jobs:
           cp "$index" dist/patches.json
           cp "$release_notes" dist/RELEASE_NOTES.md
           printf 'Upstream: %s\nCommit: %s\n' "$UPSTREAM_TAG" "$UPSTREAM_COMMIT" > dist/UPSTREAM.txt
+          cp LICENSE NOTICE dist/
 
           (
             cd dist
-            sha256sum reseam-youtube-compat.reseam patches.json BUNDLE_PUBLIC_KEY.txt BUNDLE_CONTENTS.txt UPSTREAM.txt > SHA256SUMS.txt
+            sha256sum reseam-youtube-compat.reseam patches.json BUNDLE_PUBLIC_KEY.txt BUNDLE_CONTENTS.txt UPSTREAM.txt LICENSE NOTICE > SHA256SUMS.txt
           )
 
           gh release create "$BUNDLE_VERSION" \
@@ -270,6 +271,8 @@ jobs:
             dist/BUNDLE_PUBLIC_KEY.txt \
             dist/BUNDLE_CONTENTS.txt \
             dist/UPSTREAM.txt \
+            dist/LICENSE \
+            dist/NOTICE \
             dist/RELEASE_NOTES.md \
             dist/SHA256SUMS.txt \
             --repo "$GITHUB_REPOSITORY" \
