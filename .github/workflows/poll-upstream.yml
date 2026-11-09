@@ -58,10 +58,22 @@ jobs:
           echo "commit=$upstream_commit" >> "$GITHUB_OUTPUT"
           echo "version=$bundle_version" >> "$GITHUB_OUTPUT"
 
-          if gh release view "$bundle_version" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Already published upstream release $upstream_tag as $bundle_version."
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            exit 0
+          echo "already_published=false" >> "$GITHUB_OUTPUT"
+          existing_release="$RUNNER_TEMP/existing-release.json"
+          if gh release view "$bundle_version" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease,assets > "$existing_release" 2>/dev/null; then
+            if jq -e '
+              .isDraft == false and
+              .isPrerelease == false and
+              ([.assets[].name] | index("patches.json") != null) and
+              ([.assets[].name] | index("reseam-youtube-compat.reseam") != null)
+            ' "$existing_release" >/dev/null; then
+              echo "A complete stable release already exists for $upstream_tag; verifying its feed."
+              echo "already_published=true" >> "$GITHUB_OUTPUT"
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "An incomplete release exists for $upstream_tag; rebuilding and replacing it."
           fi
 
           # After an unsigned verification build, avoid rebuilding the same upstream
@@ -76,6 +88,66 @@ jobs:
 
           echo "New upstream stable release: $upstream_tag ($upstream_commit)"
           echo "should_release=true" >> "$GITHUB_OUTPUT"
+
+      - name: Verify existing signed release
+        if: steps.upstream.outputs.already_published == 'true'
+        shell: bash
+        env:
+          UPSTREAM_TAG: ${{ steps.upstream.outputs.tag }}
+        run: |
+          set -euo pipefail
+          expected_version="${UPSTREAM_TAG#v}"
+          release_json="$RUNNER_TEMP/existing-release.json"
+          gh release view "$UPSTREAM_TAG" --repo "$GITHUB_REPOSITORY" \
+            --json isDraft,isPrerelease,assets > "$release_json"
+
+          jq -e '
+            .isDraft == false and
+            .isPrerelease == false and
+            ([.assets[].name] | index("patches.json") != null) and
+            ([.assets[].name] | index("reseam-youtube-compat.reseam") != null)
+          ' "$release_json" >/dev/null || {
+            echo "::error::The existing release is not stable or is missing required assets."
+            cat "$release_json"
+            exit 1
+          }
+
+          verify_dir="$RUNNER_TEMP/verify-existing-release"
+          mkdir -p "$verify_dir"
+          gh release download "$UPSTREAM_TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "patches.json" --pattern "reseam-youtube-compat.reseam" --dir "$verify_dir"
+
+          bundle="$verify_dir/reseam-youtube-compat.reseam"
+          pubkey_bytes="$(unzip -p "$bundle" manifest.pubkey | wc -c | tr -d ' ')"
+          public_key="$(unzip -p "$bundle" manifest.pubkey | od -An -v -tx1 | tr -d ' \n')"
+          if [[ "$pubkey_bytes" != "32" || "${#public_key}" -ne 64 ]]; then
+            echo "::error::The published bundle does not contain a 32-byte Ed25519 public key."
+            exit 1
+          fi
+
+          jq -e --arg version "$expected_version" --arg key "$public_key" '
+            .bundle.public_key == $key and
+            any(.releases[]; .version == $version and .prerelease == false)
+          ' "$verify_dir/patches.json" >/dev/null || {
+            echo "::error::The published index does not contain the expected release version or signing key."
+            cat "$verify_dir/patches.json"
+            exit 1
+          }
+
+          latest_index="$RUNNER_TEMP/latest-patches.json"
+          curl -fsSL --retry 3 --retry-delay 2 \
+            "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/patches.json" \
+            -o "$latest_index"
+          jq -e --arg version "$expected_version" --arg key "$public_key" '
+            .bundle.public_key == $key and
+            any(.releases[]; .version == $version and .prerelease == false)
+          ' "$latest_index" >/dev/null || {
+            echo "::error::The permanent /releases/latest Manager feed does not resolve to the expected signed release."
+            cat "$latest_index"
+            exit 1
+          }
+
+          echo "Existing signed Reseam release $UPSTREAM_TAG and Manager feed verified."
 
       - name: Set up JDK 17
         if: steps.upstream.outputs.should_release == 'true'
@@ -284,9 +356,10 @@ jobs:
           mkdir -p "$verify_dir"
           gh release download "$BUNDLE_VERSION" --repo "$GITHUB_REPOSITORY" \
             --pattern patches.json --dir "$verify_dir"
-          jq -e --arg version "$BUNDLE_VERSION" --arg key "$public_key" '
+          index_version="${BUNDLE_VERSION#v}"
+          jq -e --arg version "$index_version" --arg key "$public_key" '
             .bundle.public_key == $key and
-            any(.releases[]; .version == $version)
+            any(.releases[]; .version == $version and .prerelease == false)
           ' "$verify_dir/patches.json" >/dev/null || {
             echo "::error::Published patches.json is missing the release or does not pin this bundle's signing key."
             cat "$verify_dir/patches.json"
@@ -297,9 +370,9 @@ jobs:
           curl -fsSL --retry 3 --retry-delay 2 \
             "https://github.com/$GITHUB_REPOSITORY/releases/latest/download/patches.json" \
             -o "$latest_index"
-          jq -e --arg version "$BUNDLE_VERSION" --arg key "$public_key" '
+          jq -e --arg version "$index_version" --arg key "$public_key" '
             .bundle.public_key == $key and
-            any(.releases[]; .version == $version)
+            any(.releases[]; .version == $version and .prerelease == false)
           ' "$latest_index" >/dev/null || {
             echo "::error::The permanent /releases/latest Manager feed does not resolve to the newly published bundle."
             cat "$latest_index"
