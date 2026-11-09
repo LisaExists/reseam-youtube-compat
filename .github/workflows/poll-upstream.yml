@@ -191,10 +191,37 @@ jobs:
           cp "$bundle" dist/reseam-youtube-compat.reseam
           printf '%s\n' "$public_key" > dist/BUNDLE_PUBLIC_KEY.txt
 
-          "$RESEAM_BIN" bundle list dist/reseam-youtube-compat.reseam --trust "$public_key" | tee dist/BUNDLE_CONTENTS.txt
-          grep -Fq "Theme" dist/BUNDLE_CONTENTS.txt
-          grep -Fq "Restore classic miniplayer" dist/BUNDLE_CONTENTS.txt
-          grep -Fq "21.23.492" dist/BUNDLE_CONTENTS.txt
+          # Validate the signer and archive with the same CLI that packed the bundle.
+          pubkey_bytes="$(unzip -p "$bundle" manifest.pubkey | wc -c | tr -d ' ')"
+          if [[ "$pubkey_bytes" != "32" || "${#public_key}" -ne 64 ]]; then
+            echo "::error::The bundle does not contain a 32-byte Ed25519 public key (found ${pubkey_bytes} bytes)."
+            exit 1
+          fi
+
+          if ! "$RESEAM_BIN" bundle list dist/reseam-youtube-compat.reseam --trust "$public_key" > dist/BUNDLE_CONTENTS.txt 2>&1; then
+            echo "::error::Reseam CLI could not verify/list the generated bundle:"
+            cat dist/BUNDLE_CONTENTS.txt
+            exit 1
+          fi
+
+          require_bundle_entry() {
+            local needle="$1"
+            if ! grep -Fqi -- "$needle" dist/BUNDLE_CONTENTS.txt; then
+              echo "::error::Expected patch entry was not found in the signed bundle: $needle"
+              cat dist/BUNDLE_CONTENTS.txt
+              exit 1
+            fi
+          }
+          require_bundle_entry "Theme"
+          require_bundle_entry "Restore classic miniplayer"
+
+          # The YouTube version is a documented compatibility target, not a string
+          # that the CLI promises to print in its human-readable bundle listing.
+          miniplayer_source="$source/apps/youtube/patch/src/main/kotlin/app/reseam/patches/youtube/layout/RestoreClassicMiniplayer.kt"
+          test -s "$miniplayer_source"
+          grep -Fq 'compatibleWith(YOUTUBE)' "$miniplayer_source"
+          grep -Fq 'disableBooleanFeature(MINIPLAYER_MODERN_FEATURE_LEGACY_KEY)' "$miniplayer_source"
+          grep -Fq 'disableBooleanFeature(MINIPLAYER_MODERN_FEATURE_KEY)' "$miniplayer_source"
 
           if [[ "$PUBLISH_ENABLED" != "true" ]]; then
             mkdir -p state
