@@ -23,7 +23,7 @@ The URL stays the same. Reseam Manager reads the index and discovers new release
 
 ## Automatic updates
 
-GitHub Actions checks the upstream Forgejo release feed every four hours. When a new stable upstream release appears, it:
+GitHub Actions checks the upstream Forgejo release feed every 15 minutes. When a new stable upstream release appears, it:
 
 1. Downloads the exact tagged upstream source and verifies its commit against the release API.
 2. Applies the overlay. Every expected source fragment must match exactly once; unknown upstream changes stop the job safely.
@@ -62,7 +62,7 @@ gh secret set BUNDLE_SIGNING_KEY_B64 --repo LisaExists/reseam-youtube-compat --b
 
 Keep an offline backup of the key. Losing it means a new key would need to be trusted by every user again. The public key is embedded in the published index and bundle.
 
-After adding the secret, run the workflow once using **Actions → Poll upstream and publish → Run workflow**. The first run publishes the current upstream release; later runs happen automatically.
+Without the secret, the workflow can still compile and verify the current bundle using a disposable key, but it will not publish anything. After adding the secret, run the workflow once using **Actions → Poll upstream and publish → Run workflow**. That first signed run publishes the current upstream release; later runs happen automatically.
 
 ## Upstream and compatibility policy
 
