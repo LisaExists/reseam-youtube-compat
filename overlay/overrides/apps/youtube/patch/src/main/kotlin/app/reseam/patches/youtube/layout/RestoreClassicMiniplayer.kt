@@ -4,6 +4,7 @@
 package app.reseam.patches.youtube.layout
 
 import app.reseam.patch.patch
+import app.reseam.patches.youtube.YouTubePatchStrings
 import app.reseam.patches.youtube.core.YOUTUBE
 import app.reseam.patches.youtube.internal.disableBooleanFeature
 
@@ -15,8 +16,8 @@ private const val MINIPLAYER_MODERN_FEATURE_KEY = 45622882L
  * Restores YouTube's native classic compact miniplayer by pinning both modern-miniplayer
  * experiments off. This is independent of the separate Reseam "Compact miniplayer" layout patch.
  */
-val restoreClassicMiniplayer = patch("Restore classic miniplayer") {
-    description("Restores the classic horizontal miniplayer by disabling both modern miniplayer experiments. Select this patch in Reseam Manager before building YouTube; it does not add a toggle inside YouTube settings.")
+val restoreClassicMiniplayer = patch(YouTubePatchStrings.restoreClassicMiniplayer) {
+    description(YouTubePatchStrings.restoreClassicMiniplayerDescription)
     compatibleWith(YOUTUBE)
 
     execute {
