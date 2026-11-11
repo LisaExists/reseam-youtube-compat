@@ -149,8 +149,8 @@ def add_youtube_patch_strings(root: Path) -> None:
     values = {
         "restore_classic_miniplayer": "Restore classic miniplayer",
         "restore_classic_miniplayer_description": (
-            "Restores YouTube's classic horizontal miniplayer by disabling both modern miniplayer "
-            "experiments; this is a build-time patch, not an in-app setting."
+            "Restores the classic horizontal miniplayer by disabling modern miniplayer "
+            "experiments in YouTube; this is a build-time patch, not an in-app setting."
         ),
     }
 
