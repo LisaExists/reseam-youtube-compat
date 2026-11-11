@@ -132,7 +132,7 @@ def add_youtube_patch_strings(root: Path) -> None:
         build_source = replace_once(
             build_source,
             "dependencies {",
-            registration + "\\n\\ndependencies {",
+            registration + "\n\ndependencies {",
             "YouTube patch string-table registration",
         )
         build_path.write_text(build_source, encoding="utf-8")
@@ -144,7 +144,7 @@ def add_youtube_patch_strings(root: Path) -> None:
         if xml.count("</resources>") != 1:
             raise SystemExit(f"{strings_path.relative_to(root)}: expected exactly one </resources> root close tag")
     else:
-        xml = '<?xml version="1.0" encoding="utf-8"?>\\n<resources>\\n</resources>\\n'
+        xml = '<?xml version="1.0" encoding="utf-8"?>\n<resources>\n</resources>\n'
 
     values = {
         "restore_classic_miniplayer": "Restore classic miniplayer",
@@ -155,13 +155,13 @@ def add_youtube_patch_strings(root: Path) -> None:
     }
 
     for key, value in values.items():
-        pattern = rf'<string\\s+name="{re.escape(key)}">(.*?)</string>'
+        pattern = rf'<string\s+name="{re.escape(key)}">(.*?)</string>'
         existing = re.search(pattern, xml, flags=re.DOTALL)
         if existing:
             if unescape(existing.group(1)) != value:
                 raise SystemExit(f"{strings_path.relative_to(root)}: conflicting existing value for {key}")
             continue
-        entry = f'    <string name="{key}">{escape(value)}</string>\\n'
+        entry = f'    <string name="{key}">{escape(value)}</string>\n'
         xml = xml.replace("</resources>", entry + "</resources>", 1)
 
     strings_path.write_text(xml, encoding="utf-8")
