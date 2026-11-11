@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from xml.sax.saxutils import escape, unescape
 
 OLD_DARK = '''    legacyColors = listOf("yt_black0", "yt_black1", "yt_black2", "yt_black3", "yt_black1_opacity98"),
 '''
@@ -118,6 +119,54 @@ def replace_once(source: str, old: str, new: str, description: str) -> str:
     return source.replace(old, new, 1)
 
 
+def add_youtube_patch_strings(root: Path) -> None:
+    """Register generated YouTube patch StringRefs and merge our two resources."""
+    build_path = root / "apps/youtube/patch/build.gradle.kts"
+    build_source = build_path.read_text(encoding="utf-8")
+    object_name = "app.reseam.patches.youtube.YouTubePatchStrings"
+    registration = f'reseamStrings {{ objectName = "{object_name}" }}'
+
+    if registration not in build_source:
+        if "reseamStrings {" in build_source:
+            raise SystemExit("YouTube patch module already registers a different reseamStrings object")
+        build_source = replace_once(
+            build_source,
+            "dependencies {",
+            registration + "\\n\\ndependencies {",
+            "YouTube patch string-table registration",
+        )
+        build_path.write_text(build_source, encoding="utf-8")
+
+    strings_path = root / "apps/youtube/patch/src/main/strings/values/strings.xml"
+    strings_path.parent.mkdir(parents=True, exist_ok=True)
+    if strings_path.exists():
+        xml = strings_path.read_text(encoding="utf-8")
+        if xml.count("</resources>") != 1:
+            raise SystemExit(f"{strings_path.relative_to(root)}: expected exactly one </resources> root close tag")
+    else:
+        xml = '<?xml version="1.0" encoding="utf-8"?>\\n<resources>\\n</resources>\\n'
+
+    values = {
+        "restore_classic_miniplayer": "Restore classic miniplayer",
+        "restore_classic_miniplayer_description": (
+            "Restores YouTube's classic horizontal miniplayer by disabling both modern miniplayer "
+            "experiments; this is a build-time patch, not an in-app setting."
+        ),
+    }
+
+    for key, value in values.items():
+        pattern = rf'<string\\s+name="{re.escape(key)}">(.*?)</string>'
+        existing = re.search(pattern, xml, flags=re.DOTALL)
+        if existing:
+            if unescape(existing.group(1)) != value:
+                raise SystemExit(f"{strings_path.relative_to(root)}: conflicting existing value for {key}")
+            continue
+        entry = f'    <string name="{key}">{escape(value)}</string>\\n'
+        xml = xml.replace("</resources>", entry + "</resources>", 1)
+
+    strings_path.write_text(xml, encoding="utf-8")
+
+
 def replace_bundle_field(section: str, field: str, value: str) -> str:
     pattern = rf'(?m)^({re.escape(field)}\s*=\s*)".*?"\s*$'
     updated, count = re.subn(pattern, lambda match: match.group(1) + '"' + value + '"', section)
@@ -196,6 +245,7 @@ def main() -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(overlay_file, destination)
 
+    add_youtube_patch_strings(root)
     customize_manifest(root)
 
     print(f"Applied YouTube compatibility overlay to {actual_commit}")
